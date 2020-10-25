@@ -24,5 +24,6 @@ Steps to make this work
 1. pip install moviepy
 2. pip install natsort
 3. python combineVids.py
+4. final.mp4 is ready
 
 ## Combining mp4 files with Python
