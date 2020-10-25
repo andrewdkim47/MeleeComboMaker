@@ -1,6 +1,6 @@
 '''
     Takes all the mp4 files generated
-
+    and combines it and spits out the new mp4
 '''
 
 from moviepy.editor import *
@@ -9,7 +9,14 @@ from natsort import natsorted
 
 L =[]
 
-for root, dirs, files in os.walk("/path/to/the/files"):
+# Delete final output if already exists
+if os.path.exists("final.mp4"):
+  os.remove("final.mp4")
+if os.path.exists("finalTEMP_MPY_wvf_snd.mp3"):
+  os.remove("finalTEMP_MPY_wvf_snd.mp3")
+
+print("Combining Vids...")
+for root, dirs, files in os.walk("generatedVids/"):
 
     #files.sort()
     files = natsorted(files)
@@ -19,5 +26,6 @@ for root, dirs, files in os.walk("/path/to/the/files"):
             video = VideoFileClip(filePath)
             L.append(video)
 
-final_clip = concatenate_videoclips(L)
-final_clip.to_videofile("output.mp4", fps=24, remove_temp=False)
+print("concatenating videoclips...", L)
+final_clip = concatenate_videoclips(L, method="compose")
+final_clip.to_videofile("final.mp4", fps=24, remove_temp=False)
