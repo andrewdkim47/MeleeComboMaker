@@ -1,6 +1,7 @@
 # MeleeComboMaker
 
 [markdown cheatsheet](https://guides.github.com/pdfs/markdown-cheatsheet-online.pdf)
+[slippi](https://slippi.gg/)
 
 ## Summary
 
@@ -19,11 +20,13 @@ Takes in Slippi files, automatically identifies combos, combines them, and makes
 
 ## Converting slippi files into a mp4
 
+[github link for slp to mp4](https://github.com/NunoDasNeves/slp-to-mp4?fbclid=IwAR0DRyjkg-HbA0rz7XPooypKh8LIazelM0JUepxtApwIaA8LRNol82ibVRg)
+
+## Combining mp4 files with Python
+
 Steps to make this work
 
 1. pip install moviepy
 2. pip install natsort
 3. python combineVids.py
 4. final.mp4 is ready
-
-## Combining mp4 files with Python
