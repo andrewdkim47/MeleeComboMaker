@@ -22,6 +22,14 @@ Takes in Slippi files, automatically identifies combos, combines them, and makes
 
 [github link for slp to mp4](https://github.com/NunoDasNeves/slp-to-mp4?fbclid=IwAR0DRyjkg-HbA0rz7XPooypKh8LIazelM0JUepxtApwIaA8LRNol82ibVRg)
 
+For windows:
+
+1. download slp to mp4 files
+2. go to terminal
+3. download psutil: `pip install git+https://github.com/giampaolo/psutil.git`
+   - or `sudo pip install --upgrade psutil`
+4. download py-slippi: `pip install git+https://github.com/hohav/py-slippi.git`
+
 ## Combining mp4 files with Python
 
 Steps to make this work
