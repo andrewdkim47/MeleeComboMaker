@@ -24,7 +24,7 @@ Takes in Slippi files, automatically identifies combos, combines them, and makes
 
 For windows:
 
-1. download slp to mp4 files
+1. [download slp to mp4 files](https://github.com/NunoDasNeves/slp-to-mp4)
 2. go to terminal
 3. download psutil: `pip install git+https://github.com/giampaolo/psutil.git`
    - or `sudo pip install --upgrade psutil`
