@@ -1,6 +1,7 @@
 import slippi as slp
 import json
 import os
+from pathlib import Path
 from enum import IntEnum
 
 SLP_PATH = 'test_files/'
@@ -25,7 +26,8 @@ class State(IntEnum):
 def actionstate_dict():
 	temp = {}
 	count = 0
-	f = open("actionstates.txt", 'r')
+	actions_path = Path(__file__).resolve().parent / "actionstates.txt"
+	f = open(actions_path, 'r')
 	for line in f: 
 		temp[count] = line.rstrip()
 		count += 1
@@ -34,7 +36,8 @@ def actionstate_dict():
 def attack_dict(): 
 	temp = {}
 	count = 1
-	f = open("attacks.txt", 'r')
+	attacks_path = Path(__file__).resolve().parent / "attacks.txt"
+	f = open(attacks_path, 'r')
 	for line in f: 
 		temp[count] = line.rstrip()
 		count += 1
