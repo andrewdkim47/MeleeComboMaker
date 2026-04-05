@@ -109,7 +109,7 @@ def find_matching_video(output_dir: Path, slp_stem: str) -> Path | None:
     for candidate in candidates:
         if target in normalize_name_token(candidate.stem):
             return candidate
-    return candidates[0]
+    return None
 
 
 def frame_to_seconds(frame: int, startup_offset_frames: int, fps: float) -> float:

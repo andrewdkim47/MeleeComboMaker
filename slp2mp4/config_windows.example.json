@@ -1,0 +1,11 @@
+{
+    "melee_iso": "C:\\path\\to\\Super Smash Bros. Melee (v1.02).iso",
+    "dolphin_dir": "C:\\path\\to\\Slippi Launcher\\playback",
+    "ffmpeg": "C:\\path\\to\\ffmpeg.exe",
+    "resolution": "720p",
+    "widescreen": false,
+    "bitrateKbps": 8000,
+    "parallel_games": "recommended",
+    "remove_short": true,
+    "combine": true
+}

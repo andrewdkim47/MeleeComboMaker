@@ -1,1 +1,7 @@
-slp2mp4 @ git+https://github.com/davisdude/slp2mp4.git
+py-slippi
+moviepy
+natsort
+matplotlib
+psutil
+flask
+flask-cors

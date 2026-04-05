@@ -134,3 +134,7 @@ dmypy.json
 
 # Claude Code local project data
 .claude/
+
+# Machine-specific config (contains local paths to Dolphin, ISO, FFmpeg)
+slp2mp4/config_windows.json
+slp2mp4/config.json
