@@ -1,3 +1,11 @@
+"""
+Replay rendering wrapper.
+
+Converts .slp replay files to .mp4 via the slp2mp4 CLI (Dolphin + FFmpeg).
+Treat the underlying slp2mp4 tooling as a black box configured via
+slp2mp4/config_windows.json.
+"""
+
 from __future__ import annotations
 
 import shutil
@@ -13,44 +21,46 @@ class ConversionError(RuntimeError):
 def _resolve_output_path(input_path: Path, output_path: Path | None) -> Path:
     if output_path is None:
         return input_path.with_suffix(".mp4")
-
     if output_path.suffix.lower() == ".mp4":
         return output_path
-
     output_path.mkdir(parents=True, exist_ok=True)
     return output_path / f"{input_path.stem}.mp4"
 
 
 def _find_generated_output(output_dir: Path, input_stem: str) -> Path | None:
-    # slp2mp4 can prepend source directory names (e.g. "test_files falconpunch.mp4"),
-    # so we search for a best matching file instead of assuming exact basename.
-    candidates = sorted(output_dir.glob("*.mp4"), key=lambda p: p.stat().st_mtime, reverse=True)
+    """Search for the best-matching MP4 in output_dir by name similarity."""
+    candidates = sorted(
+        output_dir.glob("*.mp4"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
     if not candidates:
         return None
-
     stem_lower = input_stem.lower()
     for candidate in candidates:
         if stem_lower in candidate.stem.lower():
             return candidate
-    return candidates[0]
+    return None
 
 
 def convert_slp_to_mp4(slp_path: str, output_path: str | None = None) -> str:
     """
-    Convert a single .slp file to .mp4 using the `slp2mp4` CLI tool.
+    Convert a single .slp replay file to .mp4.
+
+    Tries the installed `slp2mp4` CLI first, then falls back to the local
+    slp2mp4/slp-to-mp4.py script in this repository.
 
     Args:
-        slp_path: Path to an input replay file ending in `.slp`.
-        output_path: Optional output mp4 path or directory. If omitted, writes
-            `<input_name>.mp4` next to the input replay.
+        slp_path: Path to the input replay file.
+        output_path: Output .mp4 path or directory. Defaults to input dir.
 
     Returns:
-        The absolute output `.mp4` path.
+        Absolute path of the output .mp4 file.
 
     Raises:
-        FileNotFoundError: If input file does not exist.
-        ValueError: If input file is not an `.slp` file.
-        ConversionError: If `slp2mp4` is not installed or conversion fails.
+        FileNotFoundError: If the input file does not exist.
+        ValueError: If the input is not a .slp file.
+        ConversionError: If slp2mp4 is not installed or conversion fails.
     """
     input_path = Path(slp_path).expanduser().resolve()
     if not input_path.exists():
@@ -71,13 +81,13 @@ def convert_slp_to_mp4(slp_path: str, output_path: str | None = None) -> str:
             check=False,
         )
     else:
-        # Fallback to the legacy local script that already exists in this repository.
-        legacy_script = Path(__file__).resolve().parents[1] / "slp2mp4" / "slp-to-mp4.py"
+        legacy_script = (
+            Path(__file__).resolve().parents[1] / "slp2mp4" / "slp-to-mp4.py"
+        )
         if not legacy_script.exists():
             raise ConversionError(
                 "slp2mp4 CLI was not found and no local fallback script exists.\n"
-                "Install dependencies with `pip install -r requirements.txt`.\n"
-                "Note: current upstream `slp2mp4` requires Python >= 3.11."
+                "Install dependencies with `pip install -r requirements.txt`."
             )
         result = subprocess.run(
             [sys.executable, str(legacy_script), str(input_path), str(final_output)],
@@ -85,22 +95,19 @@ def convert_slp_to_mp4(slp_path: str, output_path: str | None = None) -> str:
             text=True,
             check=False,
         )
+
     if result.returncode != 0:
         raise ConversionError(
-            "slp2mp4 failed.\n"
-            f"stdout:\n{result.stdout}\n"
-            f"stderr:\n{result.stderr}"
+            f"slp2mp4 failed.\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}"
         )
 
     if not final_output.exists():
-        guessed_output = _find_generated_output(final_output.parent, input_path.stem)
-        if guessed_output is not None:
-            return str(guessed_output)
+        guessed = _find_generated_output(final_output.parent, input_path.stem)
+        if guessed is not None:
+            return str(guessed)
         raise ConversionError(
-            "Conversion command succeeded but output was not found.\n"
-            f"expected: {final_output}\n"
-            f"stdout:\n{result.stdout}\n"
-            f"stderr:\n{result.stderr}"
+            "Conversion succeeded but output file was not found.\n"
+            f"Expected: {final_output}\nstdout:\n{result.stdout}"
         )
 
     return str(final_output)

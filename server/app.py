@@ -2,17 +2,16 @@
 Flask API server for MeleeComboMaker.
 
 Endpoints:
-  POST /api/upload          — Accept .slp file, validate, store, return fileId
-  POST /api/analyze         — Detect combos in a stored file, return combo list
-  POST /api/render          — Start async render job, return jobId
-  GET  /api/status/<jobId>  — Poll render job status / progress
-  GET  /api/download/<clipId> — Serve a rendered clip or highlight .mp4
+  POST /api/upload              Accept .slp file, validate, store, return fileId
+  POST /api/analyze             Detect combos in a stored file, return combo list
+  POST /api/render              Start async render job for one combo clip
+  POST /api/highlight           Assemble multiple rendered clips into a highlight
+  GET  /api/status/<jobId>      Poll job status and progress
+  GET  /api/download/<clipId>   Serve a rendered .mp4 for download
 """
 
 from __future__ import annotations
 
-import json
-import sys
 import threading
 import uuid
 from pathlib import Path
@@ -21,17 +20,10 @@ from typing import Any
 from flask import Flask, jsonify, request, send_file
 from flask_cors import CORS
 
-# ---------------------------------------------------------------------------
-# Path setup — ensure project root is importable
-# ---------------------------------------------------------------------------
-
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
-from jaeyooncode.combos import get_combo_clips, validate_slp
-from pipeline.assembler import assemble_highlight
-from slp2mp4_tools import convert_slp_to_mp4
+from melee.detection import get_combo_clips, validate_slp
+from melee.assembler import assemble_highlight
+from melee.renderer import convert_slp_to_mp4
+from melee.trimmer import find_matching_video, frame_to_seconds, resolve_ffmpeg_executable, trim_clip
 
 # ---------------------------------------------------------------------------
 # App setup
@@ -40,26 +32,21 @@ from slp2mp4_tools import convert_slp_to_mp4
 app = Flask(__name__)
 CORS(app)
 
-UPLOAD_DIR = PROJECT_ROOT / "uploads"
-OUTPUT_DIR = PROJECT_ROOT / "comboVids"
-HIGHLIGHT_DIR = PROJECT_ROOT / "highlights"
-FULL_VIDEO_DIR = PROJECT_ROOT / "generatedVids"
+_ROOT = Path(__file__).resolve().parents[1]
+UPLOAD_DIR = _ROOT / "uploads"
+OUTPUT_DIR = _ROOT / "comboVids"
+HIGHLIGHT_DIR = _ROOT / "highlights"
+FULL_VIDEO_DIR = _ROOT / "generatedVids"
 
 for _d in (UPLOAD_DIR, OUTPUT_DIR, HIGHLIGHT_DIR, FULL_VIDEO_DIR):
     _d.mkdir(parents=True, exist_ok=True)
 
-# In-memory job registry: jobId -> {status, progress, output_path, error}
+# In-memory state (single-process local app)
 _jobs: dict[str, dict[str, Any]] = {}
 _jobs_lock = threading.Lock()
-
-# In-memory file registry: fileId -> Path
-_files: dict[str, Path] = {}
-
-# In-memory combo registry: fileId -> list[combo dicts]
-_combos: dict[str, list[dict]] = {}
-
-# In-memory clip registry: clipId -> Path
-_clips: dict[str, Path] = {}
+_files: dict[str, Path] = {}       # fileId  -> .slp path
+_combos: dict[str, list] = {}      # fileId  -> combo list
+_clips: dict[str, Path] = {}       # clipId  -> .mp4 path
 
 
 # ---------------------------------------------------------------------------
@@ -70,67 +57,48 @@ def _error(message: str, status: int = 400):
     return jsonify({"error": message}), status
 
 
-def _run_render_job(job_id: str, slp_path: Path, combo: dict, clip_path: Path) -> None:
-    """Worker function executed in a background thread for one clip render."""
-    def update(status: str, progress: int, error: str | None = None) -> None:
-        with _jobs_lock:
-            _jobs[job_id]["status"] = status
-            _jobs[job_id]["progress"] = progress
-            if error:
-                _jobs[job_id]["error"] = error
+def _update_job(job_id: str, status: str, progress: int, error: str | None = None) -> None:
+    with _jobs_lock:
+        _jobs[job_id]["status"] = status
+        _jobs[job_id]["progress"] = progress
+        if error:
+            _jobs[job_id]["error"] = error
 
+
+def _render_worker(job_id: str, slp_path: Path, combo: dict, clip_path: Path) -> None:
+    """Background thread: render full video then trim one combo clip."""
     try:
-        update("rendering", 10)
+        _update_job(job_id, "rendering", 10)
 
-        # Render or find the full match video
-        full_video = _find_or_render_full_video(slp_path)
-        update("rendering", 50)
+        full_video = find_matching_video(FULL_VIDEO_DIR, slp_path.stem)
+        if full_video is None:
+            full_video = Path(convert_slp_to_mp4(str(slp_path), str(FULL_VIDEO_DIR)))
 
-        # Trim the clip using FFmpeg
-        from backend.render_combo_clips import frame_to_seconds, resolve_ffmpeg_executable, trim_clip
+        _update_job(job_id, "rendering", 50)
+
         ffmpeg_cmd = resolve_ffmpeg_executable()
-        fps = 60.0
-        startup = 123
-        start_s = frame_to_seconds(int(combo["start_frame"]), startup, fps)
-        end_s = frame_to_seconds(int(combo["end_frame"]), startup, fps)
-
+        start_s = frame_to_seconds(int(combo["start_frame"]), 123, 60.0)
+        end_s = frame_to_seconds(int(combo["end_frame"]), 123, 60.0)
         trim_clip(ffmpeg_cmd, full_video, clip_path, start_s, end_s)
-        update("done", 100)
 
+        _update_job(job_id, "done", 100)
         with _jobs_lock:
-            _jobs[job_id]["output_path"] = str(clip_path)
+            _jobs[job_id]["clip_id"] = str(clip_path)
 
     except Exception as exc:
-        update("error", 0, str(exc))
+        _update_job(job_id, "error", 0, str(exc))
 
 
-def _find_or_render_full_video(slp_path: Path) -> Path:
-    """Return an existing full-match MP4 or render it via Dolphin."""
-    candidates = sorted(FULL_VIDEO_DIR.glob("*.mp4"), key=lambda p: p.stat().st_mtime, reverse=True)
-    for c in candidates:
-        if slp_path.stem.lower() in c.stem.lower():
-            return c
-    rendered = convert_slp_to_mp4(str(slp_path), str(FULL_VIDEO_DIR))
-    return Path(rendered)
-
-
-def _run_highlight_job(job_id: str, clip_paths: list[str], output_path: Path) -> None:
-    """Worker function to assemble a multi-clip highlight video."""
-    def update(status: str, progress: int, error: str | None = None) -> None:
-        with _jobs_lock:
-            _jobs[job_id]["status"] = status
-            _jobs[job_id]["progress"] = progress
-            if error:
-                _jobs[job_id]["error"] = error
-
+def _highlight_worker(job_id: str, clip_paths: list[str], output_path: Path) -> None:
+    """Background thread: assemble clips into a highlight video."""
     try:
-        update("assembling", 10)
+        _update_job(job_id, "assembling", 10)
         assemble_highlight(clip_paths, str(output_path))
-        update("done", 100)
+        _update_job(job_id, "done", 100)
         with _jobs_lock:
             _jobs[job_id]["output_path"] = str(output_path)
     except Exception as exc:
-        update("error", 0, str(exc))
+        _update_job(job_id, "error", 0, str(exc))
 
 
 # ---------------------------------------------------------------------------
@@ -139,15 +107,7 @@ def _run_highlight_job(job_id: str, clip_paths: list[str], output_path: Path) ->
 
 @app.post("/api/upload")
 def handle_upload():
-    """
-    Accept a .slp file upload, validate it, store it, and return a fileId.
-
-    Form data:
-        file: The .slp replay file.
-
-    Returns:
-        {"fileId": "<uuid>"}
-    """
+    """Accept a .slp file, validate it, and store it for analysis."""
     if "file" not in request.files:
         return _error("No file provided.")
 
@@ -173,31 +133,19 @@ def handle_upload():
 
 @app.post("/api/analyze")
 def handle_analyze():
-    """
-    Detect and score all combos in a previously uploaded replay.
-
-    JSON body:
-        {"fileId": "<uuid>"}
-
-    Returns:
-        {"fileId": "<uuid>", "combos": [...]}
-    """
+    """Detect and score all combos in a previously uploaded replay."""
     body = request.get_json(silent=True) or {}
     file_id = body.get("fileId")
     if not file_id or file_id not in _files:
         return _error("Unknown fileId.", 404)
 
-    slp_path = _files[file_id]
-
     try:
-        combos = get_combo_clips(str(slp_path), max_combos=10, padding_frames=120)
+        combos = get_combo_clips(str(_files[file_id]), max_combos=10, padding_frames=120)
     except Exception as exc:
         return _error(f"Combo detection failed: {exc}")
 
-    # Attach stable IDs to each combo for downstream use
-    tagged = []
-    for i, c in enumerate(combos):
-        tagged.append({
+    tagged = [
+        {
             "id": f"{file_id}_combo_{i:02d}",
             "startFrame": c["start_frame"],
             "endFrame": c["end_frame"],
@@ -206,7 +154,9 @@ def handle_analyze():
             "hitCount": c["hit_count"],
             "isKill": c["is_kill"],
             "moves": c["moves"],
-        })
+        }
+        for i, c in enumerate(combos)
+    ]
 
     _combos[file_id] = combos
     return jsonify({"fileId": file_id, "combos": tagged})
@@ -214,15 +164,7 @@ def handle_analyze():
 
 @app.post("/api/render")
 def handle_render():
-    """
-    Start an async render job for one combo clip.
-
-    JSON body:
-        {"comboId": "<fileId>_combo_<nn>", "fileId": "<uuid>"}
-
-    Returns:
-        {"jobId": "<uuid>"}
-    """
+    """Start an async render job for one combo clip."""
     body = request.get_json(silent=True) or {}
     file_id = body.get("fileId")
     combo_id = body.get("comboId")
@@ -234,51 +176,38 @@ def handle_render():
 
     combos = _combos.get(file_id)
     if not combos:
-        return _error("No combos found for fileId — run /api/analyze first.")
+        return _error("No combos found — run /api/analyze first.")
 
-    # comboId format: "<fileId>_combo_<index>"
     try:
         index = int(combo_id.split("_combo_")[-1])
     except (ValueError, IndexError):
         return _error("Invalid comboId format.")
 
     if index >= len(combos):
-        return _error(f"Combo index {index} out of range ({len(combos)} combos).")
+        return _error(f"Combo index {index} out of range ({len(combos)} available).")
 
-    combo = combos[index]
     clip_id = str(uuid.uuid4())
     clip_path = OUTPUT_DIR / f"{clip_id}.mp4"
+    _clips[clip_id] = clip_path
 
     job_id = str(uuid.uuid4())
     with _jobs_lock:
         _jobs[job_id] = {"status": "pending", "progress": 0, "clip_id": clip_id}
 
-    _clips[clip_id] = clip_path
-
-    thread = threading.Thread(
-        target=_run_render_job,
-        args=(job_id, _files[file_id], combo, clip_path),
+    threading.Thread(
+        target=_render_worker,
+        args=(job_id, _files[file_id], combos[index], clip_path),
         daemon=True,
-    )
-    thread.start()
+    ).start()
 
     return jsonify({"jobId": job_id, "clipId": clip_id})
 
 
 @app.post("/api/highlight")
 def handle_highlight():
-    """
-    Assemble a multi-clip highlight video from previously rendered clips.
-
-    JSON body:
-        {"clipIds": ["<clipId>", ...], "musicPath": "<optional path>"}
-
-    Returns:
-        {"jobId": "<uuid>", "highlightId": "<uuid>"}
-    """
+    """Assemble previously rendered clips into a single highlight video."""
     body = request.get_json(silent=True) or {}
     clip_ids = body.get("clipIds", [])
-    music_path = body.get("musicPath")
 
     if not clip_ids:
         return _error("clipIds must not be empty.")
@@ -287,40 +216,30 @@ def handle_highlight():
     if missing:
         return _error(f"Unknown clipIds: {missing}", 404)
 
-    clip_paths = [str(_clips[cid]) for cid in clip_ids]
-    not_rendered = [p for p in clip_paths if not Path(p).exists()]
+    not_rendered = [cid for cid in clip_ids if not _clips[cid].exists()]
     if not_rendered:
-        return _error(f"Clips not yet rendered: {not_rendered}. Check job status first.")
+        return _error(f"Clips not yet rendered: {not_rendered}. Check job status.")
 
     highlight_id = str(uuid.uuid4())
     output_path = HIGHLIGHT_DIR / f"{highlight_id}.mp4"
+    _clips[highlight_id] = output_path
 
     job_id = str(uuid.uuid4())
     with _jobs_lock:
         _jobs[job_id] = {"status": "pending", "progress": 0, "highlight_id": highlight_id}
 
-    _clips[highlight_id] = output_path
-
-    thread = threading.Thread(
-        target=_run_highlight_job,
-        args=(job_id, clip_paths, output_path),
+    threading.Thread(
+        target=_highlight_worker,
+        args=(job_id, [str(_clips[cid]) for cid in clip_ids], output_path),
         daemon=True,
-    )
-    thread.start()
+    ).start()
 
     return jsonify({"jobId": job_id, "highlightId": highlight_id})
 
 
 @app.get("/api/status/<job_id>")
 def handle_status(job_id: str):
-    """
-    Poll the status and progress of an async job.
-
-    Returns:
-        {"status": "pending"|"rendering"|"assembling"|"done"|"error",
-         "progress": 0-100,
-         "downloadUrl": "/api/download/<clipId>"}   # only when done
-    """
+    """Poll the status and progress of an async job."""
     with _jobs_lock:
         job = _jobs.get(job_id)
 
@@ -331,12 +250,10 @@ def handle_status(job_id: str):
         "status": job["status"],
         "progress": job["progress"],
     }
-
     if job["status"] == "done":
         clip_id = job.get("clip_id") or job.get("highlight_id")
         if clip_id:
             response["downloadUrl"] = f"/api/download/{clip_id}"
-
     if job["status"] == "error":
         response["error"] = job.get("error", "Unknown error")
 

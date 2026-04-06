@@ -138,3 +138,15 @@ dmypy.json
 # Machine-specific config (contains local paths to Dolphin, ISO, FFmpeg)
 slp2mp4/config_windows.json
 slp2mp4/config.json
+
+# Runtime output directories
+uploads/
+comboVids/
+highlights/
+generatedVids/
+
+# Installed package metadata
+*.egg-info/
+
+# Test output graphs
+test_out/

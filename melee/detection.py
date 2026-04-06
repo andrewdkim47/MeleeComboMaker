@@ -1,12 +1,17 @@
-import slippi as slp
+"""
+Combo detection engine.
+
+Parses .slp replay files frame-by-frame to detect, score, and return
+the best combo windows as (start_frame, end_frame) ranges.
+"""
+
 import json
-import os
 from collections import deque
-from pathlib import Path
 from enum import IntEnum
+from pathlib import Path
 from typing import Any
 
-SLP_PATH = 'test_files/'
+import slippi as slp
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -16,11 +21,9 @@ STARTUP_FRAMES = 123       # frames skipped at game start (ready, go! sequence)
 COMBO_WINDOW = 240         # rolling window size (4 s at 60 fps) for detection
 COMBO_THRESHOLD = 100      # minimum rolling hitstun sum to consider a combo active
 PREPOST = 120              # 2-second buffer added before/after a detected combo
-MAX_MATCH_FRAMES = 28_800  # 8 min * 60 s * 60 fps — matches longer than this are rejected
+MAX_MATCH_FRAMES = 28_800  # 8 min × 60 s × 60 fps — matches longer than this are rejected
 
-# Legacy aliases kept for any code that still references the old names
-HST = COMBO_THRESHOLD
-WINDOW = COMBO_WINDOW
+_DATA_DIR = Path(__file__).resolve().parent / "data"
 
 
 # ---------------------------------------------------------------------------
@@ -40,26 +43,20 @@ class State(IntEnum):
 
 def actionstate_dict() -> dict:
     """Return a mapping of numeric action-state IDs to human-readable names."""
-    temp = {}
-    count = 0
-    actions_path = Path(__file__).resolve().parent / "actionstates.txt"
-    with open(actions_path, 'r') as f:
-        for line in f:
-            temp[count] = line.rstrip()
-            count += 1
-    return temp
+    result = {}
+    with open(_DATA_DIR / "actionstates.txt", "r") as f:
+        for count, line in enumerate(f):
+            result[count] = line.rstrip()
+    return result
 
 
 def attack_dict() -> dict:
     """Return a mapping of numeric attack IDs to human-readable attack names."""
-    temp = {}
-    count = 1
-    attacks_path = Path(__file__).resolve().parent / "attacks.txt"
-    with open(attacks_path, 'r') as f:
-        for line in f:
-            temp[count] = line.rstrip()
-            count += 1
-    return temp
+    result = {}
+    with open(_DATA_DIR / "attacks.txt", "r") as f:
+        for count, line in enumerate(f, start=1):
+            result[count] = line.rstrip()
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -96,14 +93,13 @@ def validate_slp(slp_path: str) -> Any:
     except Exception as exc:
         raise ValueError(f"Could not parse replay file: {exc}") from exc
 
-    # 1v1 only
     active_players = [p for p in game.metadata.players if p is not None]
     if len(active_players) != 2:
         raise ValueError(
-            f"Only 1v1 matches are supported. Found {len(active_players)} active player(s)."
+            f"Only 1v1 matches are supported. "
+            f"Found {len(active_players)} active player(s)."
         )
 
-    # Max 8-minute match
     duration = game.metadata.duration
     if duration is not None and duration > MAX_MATCH_FRAMES:
         raise ValueError(
@@ -130,18 +126,18 @@ def comboscore(dsum: float, hsum: float) -> float:
         hsum: Total hitstun frames accumulated during the combo window.
 
     Returns:
-        A non-negative float score. Returns 0.0 if inputs are non-positive.
+        A non-negative float score.
     """
     if dsum <= 0 or hsum <= 0:
         return 0.0
 
-    A, B = 1.0, 0.4    # hitstun weight / exponent
-    C, D = 1.0, 1.25   # damage weight / exponent
+    A, B = 1.0, 0.4   # hitstun weight / exponent
+    C, D = 1.0, 1.25  # damage weight / exponent
     return A * (hsum ** B) * C * (dsum ** D)
 
 
 # ---------------------------------------------------------------------------
-# Core detection
+# Internal detection
 # ---------------------------------------------------------------------------
 
 def _detect_combos_for_ports(
@@ -153,15 +149,7 @@ def _detect_combos_for_ports(
     padding_frames: int,
 ) -> list:
     """
-    Detect combo windows where player on port `comboer` is attacking port `victim`.
-
-    Args:
-        frames: Frame list with the startup frames already removed.
-        comboer: Port index of the attacking player.
-        victim: Port index of the defending player.
-        adict: Attack ID → name lookup.
-        sdict: Action-state ID → name lookup.
-        padding_frames: Buffer frames added before combo start and after combo end.
+    Detect combo windows where the player on port `comboer` attacks port `victim`.
 
     Returns:
         List of combo dicts with keys:
@@ -199,7 +187,7 @@ def _detect_combos_for_ports(
         if len(window) > COMBO_WINDOW:
             window_hs -= window.popleft()
 
-        # Damage this frame — ignore resets when victim respawns after death
+        # Damage delta — ignore resets when victim respawns after death
         damage_delta = max(0.0, curr_damage - victim_prev_damage)
 
         # Detect stock loss (kill)
@@ -227,8 +215,6 @@ def _detect_combos_for_ports(
             if stock_lost:
                 is_kill = True
 
-            # End combo when rolling sum drops below threshold, opponent dies,
-            # or we have reached the last frame of the match
             end_of_match = fcount == total_frames - 1
             if window_hs < COMBO_THRESHOLD or stock_lost or end_of_match:
                 start_frame = max(0, combo_start - padding_frames)
@@ -254,13 +240,16 @@ def _detect_combos_for_ports(
                 in_combo = True
                 combo_start = fcount
 
-        # Reset damage baseline to 0 when victim respawns after dying
         victim_prev_damage = 0.0 if stock_lost else curr_damage
         if curr_stocks is not None:
             victim_prev_stocks = curr_stocks
 
     return combos
 
+
+# ---------------------------------------------------------------------------
+# Public API
+# ---------------------------------------------------------------------------
 
 def get_combo_clips(
     slp_path: str,
@@ -277,7 +266,7 @@ def get_combo_clips(
     Args:
         slp_path: Path to the .slp replay file.
         max_combos: Maximum number of combos to return.
-        padding_frames: Extra frames added before combo start and after end.
+        padding_frames: Extra frames buffered before combo start and after end.
 
     Returns:
         List of combo dicts sorted by score descending, each with keys:
@@ -292,7 +281,6 @@ def get_combo_clips(
     adict = attack_dict()
     sdict = actionstate_dict()
 
-    # Find which ports are occupied (handles non-standard port assignments)
     occupied = [i for i, p in enumerate(game.metadata.players) if p is not None]
     port_a, port_b = occupied[0], occupied[1]
 
@@ -302,158 +290,6 @@ def get_combo_clips(
             _detect_combos_for_ports(frames, comboer, victim, adict, sdict, padding_frames)
         )
 
-    # Drop empty windows where no damage was actually dealt
     all_combos = [c for c in all_combos if c["hit_count"] > 0]
     all_combos.sort(key=lambda c: c["score"], reverse=True)
     return all_combos[:max_combos]
-
-
-# ---------------------------------------------------------------------------
-# Legacy functions (kept for backwards compatibility)
-# ---------------------------------------------------------------------------
-
-def find_combos(slp_path: str) -> None:
-    """
-    Parse a .slp file and write a hitmap JSON to ref/.
-
-    Legacy function — use get_combo_clips() for new code.
-    """
-    game = slp.Game(slp_path)
-    frames = game.frames[STARTUP_FRAMES:]
-    sdict = actionstate_dict()
-    adict = attack_dict()
-
-    p1_prev_state = frames[0].ports[0].leader.post.state
-    p2_prev_state = frames[0].ports[1].leader.post.state
-    p1_hs = 0.5
-    p2_hs = 0.5
-    p1_dam = 0
-    p2_dam = 0
-    p1_lal = None
-    p2_lal = None
-
-    comboer = 0
-    victim = 1
-    window_hs = 0
-    state = State.NEUTRAL
-    combo_counter = 0
-
-    hitmap = {}
-    combomap = {}
-
-    fcount = 0
-    for f in frames:
-        if f.ports[victim].leader.post.damage > p2_dam:
-            p1_lal = f.ports[comboer].leader.post.last_attack_landed
-            if p1_lal < 30:
-                hitmap[fcount] = (adict[p1_lal], f.ports[victim].leader.post.damage - p2_dam)
-            else:
-                hitmap[fcount] = (sdict[p1_lal], f.ports[victim].leader.post.damage - p2_dam)
-
-        p2_dam = f.ports[victim].leader.post.damage
-        p2_hs = f.ports[victim].leader.post.hit_stun
-
-        if fcount > COMBO_WINDOW:
-            window_hs -= 1
-        if f.ports[1].leader.post.hit_stun >= 1:
-            window_hs += 1
-        if window_hs >= COMBO_THRESHOLD and state != State.COMBO:
-            state = State.COMBO
-            combomap[fcount] = "combo started"
-
-        fcount += 1
-
-    with open('ref/' + slp_path[-9:-4] + '_hitmap.json', 'w') as outfile:
-        json.dump(hitmap, outfile, indent=4)
-
-
-def record_moves(slp_path: str, filename: str) -> None:
-    """Record all character action states and attacks from a replay to JSON files."""
-    game = slp.Game(slp_path)
-    frames = game.frames[STARTUP_FRAMES:]
-    sdict = actionstate_dict()
-    adict = attack_dict()
-
-    md = game.metadata
-    falco_states = {}
-    fox_states = {}
-    moves = {}
-
-    falco_states["duration"] = md.duration
-    fox_states["duration"] = md.duration
-
-    count = 0
-    for f in frames:
-        falstate = f.ports[0].leader.post.state
-        foxstate = f.ports[1].leader.post.state
-        last_move = f.ports[0].leader.post.last_attack_landed
-
-        if falstate not in falco_states.keys():
-            falco_states[sdict[falstate]] = count
-        if foxstate not in fox_states.keys():
-            fox_states[sdict[foxstate]] = count
-
-        if last_move is not None and last_move not in moves.keys():
-            if int(last_move) > 30:
-                moves[sdict[last_move]] = count
-            else:
-                moves[adict[last_move]] = count
-
-        count += 1
-
-    falco_states = {k: v for k, v in sorted(falco_states.items(), key=lambda item: item[1])}
-    fox_states = {k: v for k, v in sorted(fox_states.items(), key=lambda item: item[1])}
-    moves = {k: v for k, v in sorted(moves.items(), key=lambda item: item[1])}
-
-    with open('ref/' + filename + '.json', 'w') as outfile:
-        json.dump(falco_states, outfile, indent=4)
-    with open('ref/fox_' + filename + '.json', 'w') as outfile:
-        json.dump(fox_states, outfile, indent=4)
-    with open('ref/attacks_' + filename + '.json', 'w') as outfile:
-        json.dump(moves, outfile, indent=4)
-
-
-def frame_to_sec(fnum: int) -> str:
-    """Convert a frame index (startup frames removed) to an in-game clock string."""
-    last_dig = [9, 8, 7, 4, 3, 1]
-    passed = fnum // 60
-    rem = fnum % 60
-    final = 0
-
-    mins = 7 - (passed // 60)
-    secs = 60 - (passed % 60)
-    if rem:
-        secs -= 1
-    ms = 9 - (rem // 6)
-    if rem % 6:
-        final = rem % 6
-
-    return '0{}:{}.{}{}.... {} frames in'.format(mins, secs, ms, last_dig[final], fnum)
-
-
-def test() -> None:
-    """Quick utility to inspect hitstun values in a replay."""
-    fp = SLP_PATH + 'run_2.slp'
-    game = slp.Game(fp)
-    frames = game.frames[STARTUP_FRAMES:]
-    for f in frames:
-        print(f.ports[1].leader.post.hit_stun)
-    print("done")
-
-
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
-
-def main() -> None:
-    falcon = SLP_PATH + 'vs_falcon.slp'
-    run1 = SLP_PATH + 'run_1.slp'
-    run2 = SLP_PATH + 'run_2.slp'
-    run3 = SLP_PATH + 'run_3.slp'
-    run4 = SLP_PATH + 'run_4.slp'
-
-    print(frame_to_sec(2500))
-
-
-if __name__ == '__main__':
-    main()

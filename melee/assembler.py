@@ -1,5 +1,8 @@
 """
-Final video assembly: concatenate combo clips and optionally overlay music.
+Final video assembly.
+
+Concatenates combo clips into a single highlight video and optionally
+overlays background music.
 """
 
 from __future__ import annotations
@@ -33,8 +36,6 @@ def assemble_highlight(
         ValueError: If clip_paths is empty or any clip does not exist.
         RuntimeError: If video assembly fails.
     """
-    # Import here so the module can be imported without moviepy installed
-    # in environments that only run combo detection.
     from moviepy.editor import AudioFileClip, VideoFileClip, concatenate_videoclips
 
     if not clip_paths:
