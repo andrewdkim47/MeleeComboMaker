@@ -1,0 +1,7 @@
+py-slippi
+moviepy
+natsort
+matplotlib
+psutil
+flask
+flask-cors

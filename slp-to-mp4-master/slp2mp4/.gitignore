@@ -9,6 +9,9 @@ installed
 FM-v*
 slippi-r18-playback*
 ffmpeg-*
+generatedVids/
+comboVids/
+*.mp4
 
 __pycache__
 
