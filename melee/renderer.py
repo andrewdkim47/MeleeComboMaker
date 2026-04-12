@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import sys
 import time
+import unicodedata
 from pathlib import Path
 
 # Dolphin renders asynchronously — the wrapper script exits before the file
@@ -33,6 +34,16 @@ def _resolve_output_path(input_path: Path, output_path: Path | None) -> Path:
     return output_path / f"{input_path.stem}.mp4"
 
 
+def _normalize(s: str) -> str:
+    """NFKC-normalize and lowercase a string for fuzzy filename matching.
+
+    Dolphin outputs filenames with fullwidth unicode characters (e.g. U+FF3F
+    fullwidth underscore instead of ASCII underscore).  NFKC normalization
+    maps fullwidth variants back to their ASCII equivalents before comparison.
+    """
+    return unicodedata.normalize("NFKC", s).lower()
+
+
 def _find_generated_output(output_dir: Path, input_stem: str) -> Path | None:
     """Search for the best-matching MP4 in output_dir by name similarity."""
     candidates = sorted(
@@ -42,9 +53,9 @@ def _find_generated_output(output_dir: Path, input_stem: str) -> Path | None:
     )
     if not candidates:
         return None
-    stem_lower = input_stem.lower()
+    stem_norm = _normalize(input_stem)
     for candidate in candidates:
-        if stem_lower in candidate.stem.lower():
+        if stem_norm in _normalize(candidate.stem):
             return candidate
     return None
 
