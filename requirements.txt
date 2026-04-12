@@ -1,4 +1,4 @@
-py-slippi
+peppi-py
 moviepy
 natsort
 matplotlib

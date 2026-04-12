@@ -17,9 +17,18 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import matplotlib.pyplot as plt
-import slippi as slp
+import numpy as np
+from peppi_py import read_slippi
 
-from melee.detection import actionstate_dict, attack_dict, comboscore, COMBO_WINDOW
+from melee.detection import (
+    comboscore,
+    COMBO_WINDOW,
+    STARTUP_FRAMES,
+    DAMAGE_STATE_MIN,
+    DAMAGE_STATE_MAX,
+    HITSTUN_STATE_WEIGHT,
+    _to_numpy,
+)
 
 
 def record_hs(slp_path: str, plotname: str, out_dir: str = "test_out") -> None:
@@ -31,11 +40,32 @@ def record_hs(slp_path: str, plotname: str, out_dir: str = "test_out") -> None:
         plotname: Base name for output PNG files.
         out_dir: Directory to write plots into.
     """
-    game = slp.Game(slp_path)
-    frames = game.frames[123:]
+    game = read_slippi(slp_path)
+    total_frames = len(game.frames.id)
 
-    p0_name = (game.metadata.players[0].netplay_name or "P1") if game.metadata.players[0] else "P1"
-    p1_name = (game.metadata.players[1].netplay_name or "P2") if game.metadata.players[1] else "P2"
+    metadata = game.metadata or {}
+    players = metadata.get("players", {})
+    p0_name = players.get("0", {}).get("names", {}).get("netplay") or "P1"
+    p1_name = players.get("1", {}).get("names", {}).get("netplay") or "P2"
+
+    p0_post = game.frames.ports[0].leader.post
+    p1_post = game.frames.ports[1].leader.post
+
+    def _hitstun_array(post, length: int) -> np.ndarray:
+        """Build a hitstun signal array, falling back to state detection."""
+        if post.hitlag is not None:
+            return _to_numpy(post.hitlag, length)
+        state = _to_numpy(post.state, length)
+        return np.where(
+            (state >= DAMAGE_STATE_MIN) & (state <= DAMAGE_STATE_MAX),
+            HITSTUN_STATE_WEIGHT,
+            0.0,
+        ).astype(np.float32)
+
+    p0_hs_arr = _hitstun_array(p0_post, total_frames)
+    p1_hs_arr = _hitstun_array(p1_post, total_frames)
+    p0_dam_arr = _to_numpy(p0_post.percent, total_frames)
+    p1_dam_arr = _to_numpy(p1_post.percent, total_frames)
 
     p0_wind, p0_wsum = [], 0.0
     p1_wind, p1_wsum = [], 0.0
@@ -47,13 +77,13 @@ def record_hs(slp_path: str, plotname: str, out_dir: str = "test_out") -> None:
     p0_scores, p1_scores = [], []
     fcount = []
 
-    for fc, f in enumerate(frames):
-        fcount.append(fc)
+    for fc in range(STARTUP_FRAMES, total_frames):
+        fcount.append(fc - STARTUP_FRAMES)
 
-        p0_ths = float(f.ports[0].leader.post.hit_stun or 0)
-        p0_tdam = float(f.ports[0].leader.post.damage or 0)
-        p1_ths = float(f.ports[1].leader.post.hit_stun or 0)
-        p1_tdam = float(f.ports[1].leader.post.damage or 0)
+        p0_ths = float(p0_hs_arr[fc])
+        p0_tdam = float(p0_dam_arr[fc])
+        p1_ths = float(p1_hs_arr[fc])
+        p1_tdam = float(p1_dam_arr[fc])
 
         p0_dwind.append(max(0.0, p0_tdam - p0_hp))
         p0_dsum += p0_dwind[-1]
@@ -104,11 +134,13 @@ def record_hs(slp_path: str, plotname: str, out_dir: str = "test_out") -> None:
     scorefig.savefig(f"{out_dir}/{plotname}_cscores.png")
     plt.close(scorefig)
 
-    print(f"Saved plots to {out_dir}/{plotname}.png and {out_dir}/{plotname}_cscores.png")
+    print(f"Saved: {out_dir}/{plotname}.png and {out_dir}/{plotname}_cscores.png")
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Visualize combo intensity for a .slp replay")
+    parser = argparse.ArgumentParser(
+        description="Visualize combo intensity for a .slp replay"
+    )
     parser.add_argument("slp_path", help="Input .slp replay path")
     parser.add_argument("--out-dir", default="test_out", help="Output directory for PNGs")
     return parser.parse_args()

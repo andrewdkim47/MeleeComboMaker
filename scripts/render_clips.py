@@ -84,7 +84,8 @@ def main() -> None:
         if end_s <= start_s:
             continue
 
-        clip_path = out_dir / f"{slp_file.stem}_combo_{index:02d}.mp4"
+        comboer_name = clip.get("comboer_name", f"P{index}")
+        clip_path = out_dir / f"{comboer_name}_{slp_file.stem}_combo_{index:02d}.mp4"
         print(f"  Trimming combo {index}: {start_s:.1f}s – {end_s:.1f}s "
               f"(dmg={clip['total_damage']}, hits={clip['hit_count']}, "
               f"kill={clip['is_kill']})...")
