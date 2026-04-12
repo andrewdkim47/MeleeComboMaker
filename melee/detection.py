@@ -111,6 +111,23 @@ def _to_numpy(arr: Any, length: int, default: float = 0.0) -> np.ndarray:
     return arr.to_numpy(zero_copy_only=False).astype(np.float32)
 
 
+def _player_name(game: Any, port_index: int) -> str:
+    """
+    Return the netplay display name for a player, falling back to 'P1'/'P2'.
+
+    port_index is the 0-based index into game.frames.ports (not the Melee
+    port number), matching the indices returned by _occupied_ports.
+    """
+    try:
+        players = (game.metadata or {}).get("players", {})
+        name = players.get(str(port_index), {}).get("names", {}).get("netplay") or ""
+    except Exception:
+        name = ""
+    # Sanitise for use in file names: keep alphanumerics, dashes, underscores
+    safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in name).strip("_")
+    return safe or f"P{port_index + 1}"
+
+
 def _occupied_ports(game: Any) -> list[int]:
     """Return port indices for active players in this game.
 
@@ -378,6 +395,7 @@ def _detect_combos_statemachine(
                         "is_kill": stock_lost,
                         "moves": list(combo_moves),
                         "combo_count": int(c_combo_count[fcount]),
+                        "comboer_port": comboer,
                     })
 
                 # Reset combo state
@@ -586,4 +604,8 @@ def get_combo_clips(
 
     all_combos = [c for c in all_combos if c["hit_count"] > 0]
     all_combos.sort(key=lambda c: c["score"], reverse=True)
+
+    for combo in all_combos:
+        combo["comboer_name"] = _player_name(game, combo["comboer_port"])
+
     return all_combos[:max_combos]

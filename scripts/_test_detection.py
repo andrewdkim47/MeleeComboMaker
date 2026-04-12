@@ -8,8 +8,6 @@ from melee.detection import get_combo_clips
 
 replays = [
     "tests/replays/vs_falcon.slp",
-    "tests/replays/vs_marth.slp",
-    "tests/replays/vs_zelda.slp",
     "tests/replays/Game_20260404T012751.slp",
 ]
 
@@ -19,11 +17,9 @@ for slp in replays:
     print(f"  Found {len(combos)} combo(s)")
     for i, c in enumerate(combos):
         print(
-            f"  [{i}] frames {c['start_frame']}-{c['end_frame']}"
-            f"  score={c['score']:.1f}"
+            f"  [{i}] comboer={c['comboer_name']}"
             f"  dmg={c['total_damage']}"
             f"  hits={c['hit_count']}"
             f"  kill={c['is_kill']}"
-            f"  moves={c['moves']}"
         )
     print()
