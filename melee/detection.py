@@ -3,15 +3,20 @@ Combo detection engine.
 
 Parses .slp replay files frame-by-frame to detect, score, and return
 the best combo windows as (start_frame, end_frame) ranges.
+
+Uses peppi-py (Rust-backed) for replay parsing. peppi-py uses a
+struct-of-arrays layout — all frame data for a field is stored as a
+single columnar array rather than per-frame objects. We convert these
+to numpy arrays upfront for efficient iteration.
 """
 
-import json
 from collections import deque
 from enum import IntEnum
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
-import slippi as slp
+import numpy as np
+from peppi_py import read_slippi
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -22,6 +27,14 @@ COMBO_WINDOW = 240         # rolling window size (4 s at 60 fps) for detection
 COMBO_THRESHOLD = 100      # minimum rolling hitstun sum to consider a combo active
 PREPOST = 120              # 2-second buffer added before/after a detected combo
 MAX_MATCH_FRAMES = 28_800  # 8 min × 60 s × 60 fps — matches longer than this are rejected
+
+# Damage action-state range (DAMAGE_HI_1 … DAMAGE_FLY_ROLL in actionstates.txt).
+# Used as a hitstun signal when the hitlag field is absent in older replay files.
+DAMAGE_STATE_MIN = 75
+DAMAGE_STATE_MAX = 91
+# Per-frame weight applied to each damage-state frame so that a single
+# 20-frame hit roughly meets COMBO_THRESHOLD (20 × 5 = 100).
+HITSTUN_STATE_WEIGHT = 5.0
 
 _DATA_DIR = Path(__file__).resolve().parent / "data"
 
@@ -60,6 +73,31 @@ def attack_dict() -> dict:
 
 
 # ---------------------------------------------------------------------------
+# peppi-py helpers
+# ---------------------------------------------------------------------------
+
+def _to_numpy(arr, length: int, default: float = 0.0) -> np.ndarray:
+    """
+    Convert a peppi-py PyArrow array to a numpy array.
+
+    Returns an array of `default` values if the field is absent (None),
+    which happens for optional fields not present in older replay files.
+    """
+    if arr is None:
+        return np.full(length, default, dtype=np.float32)
+    return arr.to_numpy(zero_copy_only=False).astype(np.float32)
+
+
+def _occupied_ports(game: Any) -> list[int]:
+    """Return port indices for active players in this game.
+
+    peppi-py stores only occupied ports in the ports tuple, so the tuple
+    length equals the number of active players (2 for a 1v1 match).
+    """
+    return list(range(len(game.frames.ports)))
+
+
+# ---------------------------------------------------------------------------
 # Validation
 # ---------------------------------------------------------------------------
 
@@ -76,7 +114,7 @@ def validate_slp(slp_path: str) -> Any:
         slp_path: Path to the .slp replay file.
 
     Returns:
-        The parsed slippi.Game object if valid.
+        The parsed peppi_py Game object if valid.
 
     Raises:
         FileNotFoundError: If the file does not exist.
@@ -89,19 +127,21 @@ def validate_slp(slp_path: str) -> Any:
         raise ValueError(f"Expected a .slp file, got: {path.suffix!r}")
 
     try:
-        game = slp.Game(slp_path)
+        game = read_slippi(slp_path)
     except Exception as exc:
         raise ValueError(f"Could not parse replay file: {exc}") from exc
 
-    active_players = [p for p in game.metadata.players if p is not None]
-    if len(active_players) != 2:
+    active_ports = _occupied_ports(game)
+    if len(active_ports) != 2:
         raise ValueError(
             f"Only 1v1 matches are supported. "
-            f"Found {len(active_players)} active player(s)."
+            f"Found {len(active_ports)} active player(s)."
         )
 
-    duration = game.metadata.duration
-    if duration is not None and duration > MAX_MATCH_FRAMES:
+    # Duration: peppi-py metadata is a raw dict; fall back to frame count
+    metadata = game.metadata or {}
+    duration = metadata.get("lastFrame") or len(game.frames.id)
+    if duration > MAX_MATCH_FRAMES:
         raise ValueError(
             f"Match duration ({duration} frames) exceeds the 8-minute limit "
             f"({MAX_MATCH_FRAMES} frames)."
@@ -141,7 +181,7 @@ def comboscore(dsum: float, hsum: float) -> float:
 # ---------------------------------------------------------------------------
 
 def _detect_combos_for_ports(
-    frames: list,
+    game: Any,
     comboer: int,
     victim: int,
     adict: dict,
@@ -151,10 +191,41 @@ def _detect_combos_for_ports(
     """
     Detect combo windows where the player on port `comboer` attacks port `victim`.
 
+    Extracts all needed frame data as numpy arrays upfront, then iterates
+    over frames starting after STARTUP_FRAMES.
+
     Returns:
         List of combo dicts with keys:
-        start_frame, end_frame, score, total_damage, hit_count, is_kill, moves.
+        start_frame, end_frame, score, total_damage, hit_count, is_kill,
+        moves, combo_count.
     """
+    frames = game.frames
+    total_frames = len(frames.id)
+
+    victim_post = frames.ports[victim].leader.post
+    comboer_post = frames.ports[comboer].leader.post
+
+    # Extract columnar arrays to numpy upfront.
+    # Prefer the `hitlag` field (Slippi post-frame byte 0x6 — "hitstun remaining
+    # frames"), added in replay format v3.5. For older replays where it is absent
+    # (None), fall back to action-state detection: assign HITSTUN_STATE_WEIGHT to
+    # every frame the victim is in a DAMAGE_* state (states 75-91).
+    if victim_post.hitlag is not None:
+        v_hitstun = _to_numpy(victim_post.hitlag, total_frames)
+    else:
+        v_state = _to_numpy(victim_post.state, total_frames)
+        v_hitstun = np.where(
+            (v_state >= DAMAGE_STATE_MIN) & (v_state <= DAMAGE_STATE_MAX),
+            HITSTUN_STATE_WEIGHT,
+            0.0,
+        ).astype(np.float32)
+    v_damage = _to_numpy(victim_post.percent, total_frames)
+    v_stocks = _to_numpy(victim_post.stocks, total_frames)
+    v_airborne = _to_numpy(victim_post.airborne, total_frames)
+
+    c_last_attack = _to_numpy(comboer_post.last_attack_landed, total_frames)
+    c_combo_count = _to_numpy(comboer_post.combo_count, total_frames)
+
     window: deque = deque()
     window_hs = 0.0
 
@@ -166,20 +237,15 @@ def _detect_combos_for_ports(
     combo_moves: list = []
     is_kill = False
 
-    first_post = frames[0].ports[victim].leader.post
-    victim_prev_damage = float(first_post.damage or 0)
-    victim_prev_stocks = first_post.stocks
+    victim_prev_damage = float(v_damage[STARTUP_FRAMES])
+    victim_prev_stocks = float(v_stocks[STARTUP_FRAMES])
 
     combos: list = []
-    total_frames = len(frames)
 
-    for fcount, f in enumerate(frames):
-        victim_post = f.ports[victim].leader.post
-        comboer_post = f.ports[comboer].leader.post
-
-        hs = float(victim_post.hit_stun or 0)
-        curr_damage = float(victim_post.damage or 0)
-        curr_stocks = victim_post.stocks
+    for fcount in range(STARTUP_FRAMES, total_frames):
+        hs = float(v_hitstun[fcount])
+        curr_damage = float(v_damage[fcount])
+        curr_stocks = float(v_stocks[fcount])
 
         # Update rolling hitstun window
         window.append(hs)
@@ -191,11 +257,7 @@ def _detect_combos_for_ports(
         damage_delta = max(0.0, curr_damage - victim_prev_damage)
 
         # Detect stock loss (kill)
-        stock_lost = (
-            curr_stocks is not None
-            and victim_prev_stocks is not None
-            and curr_stocks < victim_prev_stocks
-        )
+        stock_lost = curr_stocks < victim_prev_stocks
 
         if in_combo:
             combo_hsum += hs
@@ -203,10 +265,10 @@ def _detect_combos_for_ports(
             if damage_delta > 0:
                 combo_damage += damage_delta
                 combo_hits += 1
-                lal = comboer_post.last_attack_landed
-                if lal is not None:
+                lal = int(c_last_attack[fcount])
+                if lal > 0:
                     try:
-                        name = adict[lal] if int(lal) < 30 else sdict[int(lal)]
+                        name = adict[lal] if lal < 30 else sdict[lal]
                         if name and name not in combo_moves:
                             combo_moves.append(name)
                     except (KeyError, TypeError):
@@ -217,8 +279,11 @@ def _detect_combos_for_ports(
 
             end_of_match = fcount == total_frames - 1
             if window_hs < COMBO_THRESHOLD or stock_lost or end_of_match:
-                start_frame = max(0, combo_start - padding_frames)
-                end_frame = min(fcount + padding_frames, total_frames - 1)
+                # Use relative frame index (startup frames removed) for
+                # consistency with how render_clips.py converts to timestamps
+                rel = fcount - STARTUP_FRAMES
+                start_frame = max(0, (combo_start - STARTUP_FRAMES) - padding_frames)
+                end_frame = min(rel + padding_frames, total_frames - STARTUP_FRAMES - 1)
                 combos.append({
                     "start_frame": start_frame,
                     "end_frame": end_frame,
@@ -227,6 +292,7 @@ def _detect_combos_for_ports(
                     "hit_count": combo_hits,
                     "is_kill": is_kill,
                     "moves": list(combo_moves),
+                    "combo_count": int(c_combo_count[fcount]),
                 })
                 in_combo = False
                 combo_damage = 0.0
@@ -241,7 +307,7 @@ def _detect_combos_for_ports(
                 combo_start = fcount
 
         victim_prev_damage = 0.0 if stock_lost else curr_damage
-        if curr_stocks is not None:
+        if stock_lost:
             victim_prev_stocks = curr_stocks
 
     return combos
@@ -270,24 +336,24 @@ def get_combo_clips(
 
     Returns:
         List of combo dicts sorted by score descending, each with keys:
-        start_frame, end_frame, score, total_damage, hit_count, is_kill, moves.
+        start_frame, end_frame, score, total_damage, hit_count, is_kill,
+        moves, combo_count.
 
     Raises:
         FileNotFoundError: If the file does not exist.
         ValueError: If validation fails (not 1v1, too long, bad file, etc.).
     """
     game = validate_slp(slp_path)
-    frames = game.frames[STARTUP_FRAMES:]
     adict = attack_dict()
     sdict = actionstate_dict()
 
-    occupied = [i for i, p in enumerate(game.metadata.players) if p is not None]
+    occupied = _occupied_ports(game)
     port_a, port_b = occupied[0], occupied[1]
 
     all_combos: list = []
     for comboer, victim in [(port_a, port_b), (port_b, port_a)]:
         all_combos.extend(
-            _detect_combos_for_ports(frames, comboer, victim, adict, sdict, padding_frames)
+            _detect_combos_for_ports(game, comboer, victim, adict, sdict, padding_frames)
         )
 
     all_combos = [c for c in all_combos if c["hit_count"] > 0]
