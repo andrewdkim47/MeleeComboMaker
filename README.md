@@ -1,76 +1,186 @@
 # MeleeComboMaker
 
-[markdown cheatsheet](https://guides.github.com/pdfs/markdown-cheatsheet-online.pdf)
-[slippi](https://slippi.gg/)
+Automatically detect and render combo highlight clips from [Slippi](https://slippi.gg/) `.slp` replay files.
 
-## Summary
+---
 
-Takes in Slippi files, automatically identifies combos, combines them, and makes a combo video.
+## What it does
 
-## Architecture:
+MeleeComboMaker reads a Melee replay, finds the best combo sequences, and outputs trimmed `.mp4` clips — ready to post on Instagram, TikTok, or YouTube.
 
-1. User Submits Slippi Files as a .zip file
-2. Program unzips and stores files
-3. For each slippi file:
-   - Use combination of computer vision / slippi data to isolate the time frames to clip
-   - Convert just the time frame into an mp4
-   - Save the new mp4
-4. Combine generated mp4s
-5. create downloadable link for new final mp4.
-
-## New: slp2mp4 integration
-
-You can now convert a replay directly in Python:
-
-```python
-from slp2mp4_tools import convert_slp_to_mp4
-
-video_path = convert_slp_to_mp4(
-    "jaeyooncode/test_files/falconpunch.slp",
-    "generatedVids"
-)
-print(video_path)
+```
+replay.slp  →  combo detection  →  Dolphin render  →  FFmpeg trim  →  combo_01.mp4
 ```
 
-To install the dependency:
+---
 
+## Motivation
+
+Manually scrubbing through replays to find highlight moments is tedious. This tool automates the full pipeline: parse the replay data, score every punish sequence, render only the frames that matter, and output a clip named after the player who landed the combo.
+
+---
+
+## Pipeline
+
+```
+.slp file
+   │
+   ├─ 1. Combo Detection (melee/detection.py)
+   │       HitSequence state-machine — requires 5+ discrete hits,
+   │       gap limits, offstage leniency, attacker-interrupt checks
+   │
+   ├─ 2. Full-match Render (melee/renderer.py)
+   │       Dolphin (Slippi playback build) → full .mp4
+   │
+   ├─ 3. Clip Trimming (melee/trimmer.py)
+   │       FFmpeg cuts each combo window from the full render
+   │
+   └─ 4. Output
+           {PlayerName}_{replay}_{combo_01..N}.mp4
+```
+
+---
+
+## Requirements
+
+| Dependency | Notes |
+|---|---|
+| Python 3.11+ | |
+| [Slippi Launcher](https://slippi.gg/) | Provides the Dolphin playback build |
+| [FFmpeg](https://ffmpeg.org/) | For clip trimming |
+| Melee ISO | `Super Smash Bros. Melee (v1.02).iso` |
+| [slp2mp4](https://github.com/NunoDasNeves/slp-to-mp4) | Wired up via `slp2mp4/config_windows.json` |
+
+---
+
+## Setup
+
+**1. Clone the repo**
+```bash
+git clone https://github.com/andrewdkim47/MeleeComboMaker.git
+cd MeleeComboMaker
+```
+
+**2. Create a virtual environment (Python 3.11+)**
+```bash
+python -m venv .venv311
+# Windows
+.venv311\Scripts\activate
+# macOS/Linux
+source .venv311/bin/activate
+```
+
+**3. Install dependencies**
 ```bash
 pip install -r requirements.txt
+pip install -e .
 ```
 
-Note: upstream `slp2mp4` currently requires Python 3.11+. If you're on an older
-Python version, the helper will fall back to this repo's existing legacy
-`slp2mp4/slp-to-mp4.py` script.
+**4. Configure slp2mp4**
 
-CLI helper script:
+Copy the example config and fill in your paths:
+```bash
+cp slp2mp4/config_windows.example.json slp2mp4/config_windows.json
+```
+
+```json
+{
+  "melee_iso": "C:/path/to/SSBM.iso",
+  "dolphin_dir": "C:/path/to/Slippi Launcher/playback",
+  "ffmpeg": "C:/path/to/ffmpeg.exe",
+  "resolution": "720p",
+  "widescreen": false,
+  "bitrateKbps": 8000
+}
+```
+
+---
+
+## Usage
+
+### Generate combo clips from a replay
 
 ```bash
-python backend/convert_replay.py jaeyooncode/test_files/falconpunch.slp -o generatedVids
+python scripts/render_clips.py tests/replays/my_game.slp -o comboVids/
 ```
 
-Combo highlight pipeline (reuse a full-match render and trim clips):
+This will:
+1. Detect combos in the replay
+2. Render the full match via Dolphin (takes a few minutes)
+3. Trim each combo window with FFmpeg
+4. Output clips named `{PlayerName}_{replay}_combo_01.mp4`, etc.
+
+### Options
+
+```
+python scripts/render_clips.py <slp_path> [options]
+
+  -o, --output-dir          Output directory for clips (default: comboVids)
+  --max-combos N            Max clips to export (default: 5)
+  --padding-frames N        Buffer frames around each combo (default: 120)
+  --full-video-path PATH    Skip re-rendering — use an existing full-match mp4
+  --full-video-output-dir   Where to write the full render (default: generatedVids)
+```
+
+### Skip re-rendering (if full video already exists)
 
 ```bash
-python backend/render_combo_clips.py jaeyooncode/test_files/falconpunch.slp -o comboVids --full-video-path "generatedVids/test_files falconpunch.mp4"
+python scripts/render_clips.py tests/replays/my_game.slp \
+  -o comboVids/ \
+  --full-video-path "generatedVids/my_game.mp4"
 ```
 
-## Converting slippi files into a mp4
+---
 
-[github link for slp to mp4](https://github.com/NunoDasNeves/slp-to-mp4?fbclid=IwAR0DRyjkg-HbA0rz7XPooypKh8LIazelM0JUepxtApwIaA8LRNol82ibVRg)
+## Combo Detection
 
-For windows:
+Combos are detected using the **HitSequence** algorithm:
 
-1. [download slp to mp4 files](https://github.com/NunoDasNeves/slp-to-mp4)
-2. go to terminal
-3. download psutil: `pip install git+https://github.com/giampaolo/psutil.git`
-   - or `sudo pip install --upgrade psutil`
-4. download py-slippi: `pip install git+https://github.com/hohav/py-slippi.git`
+- **5+ discrete hits** required (multi-hit moves like Fox dair count as one)
+- **Max 5s gap** between hits; extended to **10s** when victim is offstage/recovering
+- **Attacker interrupt**: combo is invalidated if the attacker takes 3+ distinct hits
+- Clips start **3.5s before** the first hit and end **2.5s after** the last hit (or **3s after** a kill)
+- Falls back to a rolling-window detector for older replay formats
 
-## Combining mp4 files with Python
+Combos are scored by damage dealt and ranked — the best clip is always `combo_01`.
 
-Steps to make this work
+---
 
-1. pip install moviepy
-2. pip install natsort
-3. python combineVids.py
-4. final.mp4 is ready
+## Project Structure
+
+```
+melee/              Core library
+  detection.py      HitSequence combo detector
+  renderer.py       Dolphin render wrapper
+  trimmer.py        FFmpeg clip trimmer
+  assembler.py      moviepy highlight assembler
+  data/             Action state + attack name tables
+
+scripts/
+  render_clips.py   CLI entry point
+  visualize.py      Dev tool — combo intensity graphs
+
+server/
+  app.py            Flask API (upload → analyze → render → download)
+
+tests/
+  replays/          Sample .slp files for testing
+
+slp2mp4/            slp-to-mp4 integration (Dolphin + FFmpeg config)
+```
+
+---
+
+## Supported Stages (offstage detection)
+
+Battlefield · Final Destination · Dreamland 64 · Fountain of Dreams · Yoshi's Story · Pokémon Stadium
+
+---
+
+## Limitations
+
+- **1v1 only** — teams and free-for-all are not supported
+- **8 minute max** match duration
+- Rendering requires a legal Melee ISO and Dolphin playback build
+- Windows is the primary supported platform (Dolphin path config)
+
