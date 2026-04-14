@@ -1,12 +1,12 @@
-# MeleeComboMaker
+# slippi-combo-clipper
 
-Automatically detect and render combo highlight clips from [Slippi](https://slippi.gg/) `.slp` replay files.
+Automatically detect and render combo highlight clips from [Slippi](https://slippi.gg/) `.slp` replay files for Super Smash Bros Melee
 
 ---
 
 ## What it does
 
-MeleeComboMaker reads a Melee replay, finds the best combo sequences, and outputs trimmed `.mp4` clips — ready to post on Instagram, TikTok, or YouTube.
+slippi-combo-clipper reads a Melee replay, finds the best combo sequences, and outputs trimmed `.mp4` clips — ready to post on Instagram, TikTok, or YouTube.
 
 ```
 replay.slp  →  combo detection  →  Dolphin render  →  FFmpeg trim  →  combo_01.mp4
