@@ -19,6 +19,11 @@ replay.slp  →  combo detection  →  Dolphin render  →  FFmpeg trim  →  co
 Manually scrubbing through replays to find highlight moments is tedious. This tool automates the full pipeline: parse the replay data, score every punish sequence, render only the frames that matter, and output a clip named after the player who landed the combo.
 
 ---
+## Demo
+
+[![Watch the video](https://img.youtube.com/vi/g5WIzT70_jQ/0.jpg)](https://www.youtube.com/watch?v=g5WIzT70_jQ)
+
+---
 
 ## Pipeline
 
